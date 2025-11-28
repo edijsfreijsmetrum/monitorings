@@ -7,8 +7,8 @@ import datetime
 from zoneinfo import ZoneInfo
 
 # Supabase konfigurācija
-supabase_url = os.getenv("SUPABASE_URL")
-supabase_key = os.getenv("SUPABASE_KEY")
+supabase_url = st.secrets["supabase_url"]
+supabase_key = st.secrets["supabase_key"]
 
 # Konstantas
 APP_NAME = "Monitoringa atskaite"
