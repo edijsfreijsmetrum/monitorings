@@ -1,0 +1,2089 @@
+<!DOCTYPE html>
+<html lang="lv">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Deformāciju analīze</title>
+    <script src="https://cdn.plot.ly/plotly-3.0.1.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.3.0/papaparse.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+    <!-- Proj4js for accurate coordinate transformations -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/proj4js/2.8.1/proj4.min.js"></script>
+    <!-- DXF Parser library -->
+    <script src="https://unpkg.com/dxf-parser@1.1.2/dist/dxf-parser.js"></script>
+    <!-- JSZip for KMZ file handling -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+    <!-- Leaflet CSS and JS -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" 
+          integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" 
+          crossorigin=""/>
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" 
+            integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" 
+            crossorigin=""></script>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        .container {
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+        .upload-section {
+            border: 2px dashed #ccc;
+            padding: 20px;
+            text-align: center;
+            margin-bottom: 20px;
+        }
+        .charts-container {
+            display: flex;
+            flex-direction: column;
+            gap: 30px;
+        }
+        .chart {
+            max-width: 1200px;
+            height: 60vh;
+            padding: 10px;
+            box-sizing: border-box;
+        }
+        #map {
+            height: 60vh;
+            width: 100%;
+            max-width: 100%;
+            margin: 0 auto;
+            position: relative;
+            z-index: 0;
+            box-sizing: border-box;
+        }
+        .leaflet-container {
+            z-index: 0;
+            height: 100%;
+            width: 100%;
+        }
+        .buttons {
+            display: flex;
+            gap: 10px;
+            margin-top: 10px;
+        }
+        button {
+            padding: 10px 15px;
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            cursor: pointer;
+            border-radius: 4px;
+        }
+        button:hover {
+            background-color: #45a049;
+        }
+        .hidden {
+            display: none;
+        }
+        .missing-coords {
+            margin-top: 20px;
+            padding: 15px;
+            background-color: #f8f9fa;
+            border-radius: 4px;
+        }
+        .missing-coords h4 {
+            margin-top: 0;
+            color: #dc3545;
+        }
+        .missing-coords ul {
+            margin: 0;
+            padding-left: 20px;
+        }
+        .legend {
+            padding: 10px;
+            background-color: white;
+            border-radius: 5px;
+            box-shadow: 0 1px 5px rgba(0,0,0,0.4);
+            line-height: 18px;
+            color: #555;
+        }
+        .legend i {
+            width: 18px;
+            height: 18px;
+            float: left;
+            margin-right: 8px;
+            opacity: 0.7;
+        }
+        .leaflet-control-layers {
+            clear: both;
+        }
+        .dxf-upload {
+            margin-bottom: 10px;
+            padding: 10px;
+            background-color: #f8f9fa;
+            border-radius: 4px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .dxf-upload button {
+            padding: 5px 10px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="upload-section">
+            <h2>Deformāciju analīze</h2>
+            <p>Failam jābūt ar semikolu (;) kā atdalītāju.</p>
+            <input type="file" id="csvFile" accept=".csv, .xlsx, .xls" />
+            
+            <div class="dxf-upload" style="margin-top: 15px;">
+                <label for="geoFile">Pievienot failu kartei (neobligāts): </label>
+                <input type="file" id="geoFile" accept=".dxf,.kmz,.kml" />
+            </div>
+            
+            <div class="buttons">
+                <button onclick="processData()">Apstrādāt datus</button>
+                <button id="downloadHtmlBtn" class="hidden" onclick="downloadFullReportHtml()">Lejupielādēt kā HTML</button>
+            </div>
+        </div>
+        
+        <div id="results" class="hidden">
+            <h2>Rezultāti</h2>
+            
+            <div class="charts-container">
+                <div>
+                    <h3>Deformācija attiecībā pret pirmo derīgo ciklu (visi reperi)</h3>
+                    <div id="chart1" class="chart"></div>
+                </div>
+                <div>
+                    <h3>Reperu izvietojuma karte</h3>
+                    <div id="map"></div>
+                    <div id="missingCoords" class="missing-coords"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Globālie mainīgie
+        let chartData = {
+            chart1: null
+        };
+        // Sinhronizācijas bloķēšanas mainīgais
+        let isSyncing = false;
+
+        // Global variables for DXF layer
+        let dxfLayer = null;
+        let kmlLayer = null;
+        
+        // Function to process and display geographic files (DXF, KMZ, KML)
+        function processGeoFile() {
+            const fileInput = document.getElementById('geoFile');
+            const file = fileInput.files[0];
+            
+            if (!file) {
+                alert('Lūdzu, izvēlieties failu!');
+                return;
+            }
+            
+            const fileName = file.name.toLowerCase();
+            
+            if (fileName.endsWith('.dxf')) {
+                processDxfFile(file);
+            } else if (fileName.endsWith('.kmz')) {
+                processKmzFile(file);
+            } else if (fileName.endsWith('.kml')) {
+                processKmlFile(file);
+            } else {
+                alert('Atbalstīti tikai .dxf, .kmz un .kml faili!');
+            }
+        }
+        
+        // Function to process KMZ files (compressed KML)
+        function processKmzFile(file) {
+            // Remove existing KML layer if any
+            if (kmlLayer && window.reperMap) {
+                window.reperMap.removeLayer(kmlLayer);
+                kmlLayer = null;
+            }
+            
+            const reader = new FileReader();
+            
+            reader.onload = function(e) {
+                try {
+                    // Use JSZip to extract the KML from KMZ
+                    const zip = new JSZip();
+                    
+                    // Store for images and other resources in the KMZ
+                    window.kmzResources = {};
+                    
+                    zip.loadAsync(e.target.result)
+                        .then(function(zip) {
+                            console.log("KMZ zip contents:", Object.keys(zip.files));
+                            
+                            // First, extract all files to have resources available
+                            const extractionPromises = [];
+                            
+                            zip.forEach(function(relativePath, zipEntry) {
+                                // Skip directories
+                                if (zipEntry.dir) return;
+                                
+                                // Extract file content based on type
+                                let extractionPromise;
+                                
+                                if (relativePath.match(/\.(png|jpe?g|gif|bmp|svg)$/i)) {
+                                    // Handle images - extract as base64 data URL
+                                    extractionPromise = zipEntry.async('base64').then(function(content) {
+                                        const extension = relativePath.split('.').pop().toLowerCase();
+                                        const mimeType = getMimeType(extension);
+                                        window.kmzResources[relativePath] = `data:${mimeType};base64,${content}`;
+                                    });
+                                } else if (relativePath.match(/\.kml$/i)) {
+                                    // KML files as text
+                                    extractionPromise = zipEntry.async('string').then(function(content) {
+                                        window.kmzResources[relativePath] = content;
+                                    });
+                                }
+                                
+                                if (extractionPromise) {
+                                    extractionPromises.push(extractionPromise);
+                                }
+                            });
+                            
+                            // Wait for all extractions to complete
+                            return Promise.all(extractionPromises).then(function() {
+                                // Find the main KML file (usually doc.kml)
+                                let kmlContent = null;
+                                
+                                if (window.kmzResources['doc.kml']) {
+                                    kmlContent = window.kmzResources['doc.kml'];
+                                } else {
+                                    // Look for any KML file
+                                    for (const path in window.kmzResources) {
+                                        if (path.toLowerCase().endsWith('.kml')) {
+                                            kmlContent = window.kmzResources[path];
+                                            break;
+                                        }
+                                    }
+                                }
+                                
+                                if (!kmlContent) {
+                                    throw new Error('KML fails netika atrasts KMZ arhīvā!');
+                                }
+                                
+                                return kmlContent;
+                            });
+                        })
+                        .then(function(kmlContent) {
+                            // Process the KML content with resource access
+                            parseKmlAndAddToMap(kmlContent, true);
+                            alert('KMZ fails veiksmīgi pievienots kartei!');
+                        })
+                        .catch(function(error) {
+                            console.error("Error processing KMZ file:", error);
+                            alert('Kļūda apstrādājot KMZ failu: ' + error.message);
+                        });
+                } catch (error) {
+                    console.error("Error processing KMZ file:", error);
+                    alert('Kļūda apstrādājot KMZ failu: ' + error.message);
+                }
+            };
+            
+            reader.onerror = function() {
+                alert('Kļūda nolasot failu!');
+            };
+            
+            reader.readAsArrayBuffer(file);
+        }
+        
+        // Helper function to get MIME type from file extension
+        function getMimeType(extension) {
+            const mimeTypes = {
+                'png': 'image/png',
+                'jpg': 'image/jpeg',
+                'jpeg': 'image/jpeg',
+                'gif': 'image/gif',
+                'bmp': 'image/bmp',
+                'svg': 'image/svg+xml'
+            };
+            
+            return mimeTypes[extension.toLowerCase()] || 'application/octet-stream';
+        }
+        
+        // Function to process KML files
+        function processKmlFile(file) {
+            // Remove existing KML layer if any
+            if (kmlLayer && window.reperMap) {
+                window.reperMap.removeLayer(kmlLayer);
+                kmlLayer = null;
+            }
+            
+            // Clear any previous KMZ resources
+            window.kmzResources = {};
+            
+            const reader = new FileReader();
+            
+            reader.onload = function(e) {
+                try {
+                    // Process the KML content
+                    parseKmlAndAddToMap(e.target.result, false);
+                    alert('KML fails veiksmīgi pievienots kartei!');
+                } catch (error) {
+                    console.error("Error processing KML file:", error);
+                    alert('Kļūda apstrādājot KML failu: ' + error.message);
+                }
+            };
+            
+            reader.onerror = function() {
+                alert('Kļūda nolasot failu!');
+            };
+            
+            reader.readAsText(file);
+        }
+        
+        // Function to parse KML content and add it to the map
+        function parseKmlAndAddToMap(kmlContent, isKmz) {
+            // Create a new feature group for KML content
+            kmlLayer = L.featureGroup();
+            
+            // Parse the KML content using DOMParser
+            const parser = new DOMParser();
+            const kmlDoc = parser.parseFromString(kmlContent, 'text/xml');
+            
+            // Check for parse errors
+            const parseError = kmlDoc.getElementsByTagName('parsererror');
+            if (parseError.length > 0) {
+                console.error("KML parsing error:", parseError[0].textContent);
+                alert('Kļūda parsējot KML failu!');
+                return;
+            }
+            
+            console.log("KML document loaded, parsing elements...");
+            
+            // Extract styles from the KML document
+            const styles = {};
+            const styleElements = kmlDoc.getElementsByTagName('Style');
+            
+            for (let i = 0; i < styleElements.length; i++) {
+                const style = styleElements[i];
+                const styleId = style.getAttribute('id');
+                
+                if (styleId) {
+                    // Extract line style
+                    const lineStyle = style.getElementsByTagName('LineStyle')[0];
+                    const polyStyle = style.getElementsByTagName('PolyStyle')[0];
+                    const iconStyle = style.getElementsByTagName('IconStyle')[0];
+                    const labelStyle = style.getElementsByTagName('LabelStyle')[0];
+                    
+                    styles[styleId] = {
+                        line: lineStyle ? {
+                            color: parseKmlColor(lineStyle.getElementsByTagName('color')[0]?.textContent),
+                            width: parseFloat(lineStyle.getElementsByTagName('width')[0]?.textContent) || 2
+                        } : null,
+                        poly: polyStyle ? {
+                            color: parseKmlColor(polyStyle.getElementsByTagName('color')[0]?.textContent),
+                            fill: polyStyle.getElementsByTagName('fill')[0]?.textContent !== '0',
+                            outline: polyStyle.getElementsByTagName('outline')[0]?.textContent !== '0'
+                        } : null,
+                        icon: iconStyle ? {
+                            scale: parseFloat(iconStyle.getElementsByTagName('scale')[0]?.textContent) || 1,
+                            href: getIconHref(iconStyle.getElementsByTagName('href')[0]?.textContent, isKmz)
+                        } : null,
+                        label: labelStyle ? {
+                            color: parseKmlColor(labelStyle.getElementsByTagName('color')[0]?.textContent),
+                            scale: parseFloat(labelStyle.getElementsByTagName('scale')[0]?.textContent) || 1
+                        } : null
+                    };
+                }
+            }
+            
+            // Extract style maps
+            const styleMaps = {};
+            const styleMapElements = kmlDoc.getElementsByTagName('StyleMap');
+            
+            for (let i = 0; i < styleMapElements.length; i++) {
+                const styleMap = styleMapElements[i];
+                const styleMapId = styleMap.getAttribute('id');
+                
+                if (styleMapId) {
+                    const pairs = styleMap.getElementsByTagName('Pair');
+                    for (let j = 0; j < pairs.length; j++) {
+                        const pair = pairs[j];
+                        const key = pair.getElementsByTagName('key')[0]?.textContent;
+                        const styleUrl = pair.getElementsByTagName('styleUrl')[0]?.textContent;
+                        
+                        if (key === 'normal' && styleUrl) {
+                            // Remove # from styleUrl
+                            styleMaps[styleMapId] = styleUrl.replace('#', '');
+                            break;
+                        }
+                    }
+                }
+            }
+            
+            // Process Document properties for name and description
+            const docElement = kmlDoc.getElementsByTagName('Document')[0];
+            if (docElement) {
+                const docName = docElement.getElementsByTagName('name')[0]?.textContent;
+                if (docName) {
+                    console.log("KML Document name:", docName);
+                }
+            }
+            
+            // Process Folders
+            processFolders(kmlDoc.getElementsByTagName('Folder'), kmlLayer, styles, styleMaps, isKmz);
+            
+            // Process Placemarks at the Document level
+            const documentPlacemarks = [];
+            const docPlacemarks = kmlDoc.getElementsByTagName('Document')[0]?.getElementsByTagName('Placemark');
+            if (docPlacemarks) {
+                for (let i = 0; i < docPlacemarks.length; i++) {
+                    documentPlacemarks.push(docPlacemarks[i]);
+                }
+            }
+            
+            // Also get placemarks directly under kml root (rare but possible)
+            const rootPlacemarks = kmlDoc.getElementsByTagName('kml')[0]?.getElementsByTagName('Placemark');
+            if (rootPlacemarks) {
+                for (let i = 0; i < rootPlacemarks.length; i++) {
+                    documentPlacemarks.push(rootPlacemarks[i]);
+                }
+            }
+            
+            processPlacemarks(documentPlacemarks, kmlLayer, styles, styleMaps, isKmz);
+            
+            // Process GroundOverlays
+            processGroundOverlays(kmlDoc.getElementsByTagName('GroundOverlay'), kmlLayer, isKmz);
+            
+            // Add the KML layer to the map
+            if (window.reperMap && kmlLayer.getLayers().length > 0) {
+                kmlLayer.addTo(window.reperMap);
+                
+                // Try to fit the map to the KML bounds
+                try {
+                    const bounds = kmlLayer.getBounds();
+                    if (bounds.isValid()) {
+                        window.reperMap.fitBounds(bounds);
+                    }
+                } catch (error) {
+                    console.error("Error fitting to KML bounds:", error);
+                }
+                
+                console.log(`Added ${kmlLayer.getLayers().length} layers to map from KML`);
+            } else {
+                console.warn("No valid KML features found or map not available");
+            }
+        }
+        
+        // Function to process KML folders
+        function processFolders(folders, parentLayer, styles, styleMaps, isKmz) {
+            for (let i = 0; i < folders.length; i++) {
+                const folder = folders[i];
+                const folderName = folder.getElementsByTagName('name')[0]?.textContent || 'Unnamed Folder';
+                
+                console.log(`Processing folder: ${folderName}`);
+                
+                // Create a feature group for this folder
+                const folderLayer = L.featureGroup();
+                
+                // Process placemarks in this folder
+                const placemarks = folder.getElementsByTagName('Placemark');
+                processPlacemarks(placemarks, folderLayer, styles, styleMaps, isKmz);
+                
+                // Process ground overlays in this folder
+                const groundOverlays = folder.getElementsByTagName('GroundOverlay');
+                processGroundOverlays(groundOverlays, folderLayer, isKmz);
+                
+                // Process subfolders recursively
+                const subfolders = folder.getElementsByTagName('Folder');
+                processFolders(subfolders, folderLayer, styles, styleMaps, isKmz);
+                
+                // Add this folder to parent layer if it has any content
+                if (folderLayer.getLayers().length > 0) {
+                    folderLayer.addTo(parentLayer);
+                }
+            }
+        }
+        
+        // Process Ground Overlays (images overlaid on the map)
+        function processGroundOverlays(overlays, parentLayer, isKmz) {
+            for (let i = 0; i < overlays.length; i++) {
+                const overlay = overlays[i];
+                const name = overlay.getElementsByTagName('name')[0]?.textContent || '';
+                
+                // Get image URL
+                const icon = overlay.getElementsByTagName('Icon')[0];
+                if (!icon) continue;
+                
+                const href = icon.getElementsByTagName('href')[0]?.textContent;
+                if (!href) continue;
+                
+                // Get image URL, handling KMZ resources
+                const imageUrl = isKmz && window.kmzResources[href] ? 
+                    window.kmzResources[href] : href;
+                
+                // Get bounds
+                const latLonBox = overlay.getElementsByTagName('LatLonBox')[0];
+                if (!latLonBox) continue;
+                
+                const north = parseFloat(latLonBox.getElementsByTagName('north')[0]?.textContent);
+                const south = parseFloat(latLonBox.getElementsByTagName('south')[0]?.textContent);
+                const east = parseFloat(latLonBox.getElementsByTagName('east')[0]?.textContent);
+                const west = parseFloat(latLonBox.getElementsByTagName('west')[0]?.textContent);
+                
+                if (isNaN(north) || isNaN(south) || isNaN(east) || isNaN(west)) continue;
+                
+                // Create image overlay
+                const imageBounds = [[south, west], [north, east]];
+                const imageOverlay = L.imageOverlay(imageUrl, imageBounds, {
+                    opacity: 0.8,
+                    interactive: true
+                });
+                
+                if (name) {
+                    imageOverlay.bindTooltip(name);
+                }
+                
+                imageOverlay.addTo(parentLayer);
+            }
+        }
+        
+        // Function to process placemarks
+        function processPlacemarks(placemarks, parentLayer, styles, styleMaps, isKmz) {
+            for (let i = 0; i < placemarks.length; i++) {
+                const placemark = placemarks[i];
+                const name = placemark.getElementsByTagName('name')[0]?.textContent || '';
+                const description = placemark.getElementsByTagName('description')[0]?.textContent || '';
+                
+                // Get style information
+                let styleId = null;
+                const styleUrl = placemark.getElementsByTagName('styleUrl')[0]?.textContent;
+                
+                if (styleUrl) {
+                    // Remove # from styleUrl
+                    styleId = styleUrl.replace('#', '');
+                    
+                    // Check if this is a style map reference
+                    if (styleMaps[styleId]) {
+                        styleId = styleMaps[styleId];
+                    }
+                }
+                
+                const style = styles[styleId] || {};
+                
+                // Check for inline style
+                const inlineStyle = placemark.getElementsByTagName('Style')[0];
+                if (inlineStyle) {
+                    const lineStyle = inlineStyle.getElementsByTagName('LineStyle')[0];
+                    const polyStyle = inlineStyle.getElementsByTagName('PolyStyle')[0];
+                    const iconStyle = inlineStyle.getElementsByTagName('IconStyle')[0];
+                    
+                    if (lineStyle) {
+                        style.line = style.line || {};
+                        style.line.color = parseKmlColor(lineStyle.getElementsByTagName('color')[0]?.textContent) || style.line.color;
+                        style.line.width = parseFloat(lineStyle.getElementsByTagName('width')[0]?.textContent) || style.line.width || 2;
+                    }
+                    
+                    if (polyStyle) {
+                        style.poly = style.poly || {};
+                        style.poly.color = parseKmlColor(polyStyle.getElementsByTagName('color')[0]?.textContent) || style.poly.color;
+                        style.poly.fill = polyStyle.getElementsByTagName('fill')[0]?.textContent !== '0';
+                        style.poly.outline = polyStyle.getElementsByTagName('outline')[0]?.textContent !== '0';
+                    }
+                    
+                    if (iconStyle) {
+                        style.icon = style.icon || {};
+                        style.icon.scale = parseFloat(iconStyle.getElementsByTagName('scale')[0]?.textContent) || style.icon.scale || 1;
+                        const iconHref = iconStyle.getElementsByTagName('href')[0]?.textContent;
+                        if (iconHref) {
+                            style.icon.href = getIconHref(iconHref, isKmz);
+                        }
+                    }
+                }
+                
+                // Process MultiGeometry
+                const multiGeometry = placemark.getElementsByTagName('MultiGeometry')[0];
+                if (multiGeometry) {
+                    processMultiGeometry(multiGeometry, name, description, style, parentLayer);
+                    continue;
+                }
+                
+                // Process Point
+                const point = placemark.getElementsByTagName('Point')[0];
+                if (point) {
+                    processPoint(point, name, description, style, parentLayer, isKmz);
+                    continue;
+                }
+                
+                // Process LineString
+                const lineString = placemark.getElementsByTagName('LineString')[0];
+                if (lineString) {
+                    processLineString(lineString, name, description, style, parentLayer);
+                    continue;
+                }
+                
+                // Process Polygon
+                const polygon = placemark.getElementsByTagName('Polygon')[0];
+                if (polygon) {
+                    processPolygon(polygon, name, description, style, parentLayer);
+                    continue;
+                }
+            }
+        }
+        
+        // Process MultiGeometry
+        function processMultiGeometry(multiGeometry, name, description, style, parentLayer) {
+            // Process all Points
+            const points = multiGeometry.getElementsByTagName('Point');
+            for (let i = 0; i < points.length; i++) {
+                processPoint(points[i], name, description, style, parentLayer);
+            }
+            
+            // Process all LineStrings
+            const lineStrings = multiGeometry.getElementsByTagName('LineString');
+            for (let i = 0; i < lineStrings.length; i++) {
+                processLineString(lineStrings[i], name, description, style, parentLayer);
+            }
+            
+            // Process all Polygons
+            const polygons = multiGeometry.getElementsByTagName('Polygon');
+            for (let i = 0; i < polygons.length; i++) {
+                processPolygon(polygons[i], name, description, style, parentLayer);
+            }
+        }
+        
+        // Process Point
+        function processPoint(point, name, description, style, parentLayer, isKmz) {
+            const coordinates = point.getElementsByTagName('coordinates')[0]?.textContent.trim().split(',');
+            if (!coordinates || coordinates.length < 2) return;
+            
+            const lng = parseFloat(coordinates[0]);
+            const lat = parseFloat(coordinates[1]);
+            
+            if (isNaN(lng) || isNaN(lat)) return;
+            
+            let marker;
+            
+            // Check if we have a custom icon
+            if (style.icon && style.icon.href) {
+                const iconSize = style.icon.scale ? [24 * style.icon.scale, 24 * style.icon.scale] : [24, 24];
+                const icon = L.icon({
+                    iconUrl: style.icon.href,
+                    iconSize: iconSize,
+                    iconAnchor: [iconSize[0]/2, iconSize[1]/2],
+                    popupAnchor: [0, -iconSize[1]/2]
+                });
+                marker = L.marker([lat, lng], { icon: icon });
+            } else {
+                marker = L.marker([lat, lng]);
+            }
+            
+            if (name || description) {
+                const popupContent = `<b>${name}</b>${description ? '<br>' + description : ''}`;
+                marker.bindPopup(popupContent);
+            }
+            
+            marker.addTo(parentLayer);
+        }
+        
+        // Process LineString
+        function processLineString(lineString, name, description, style, parentLayer) {
+            const coordinatesText = lineString.getElementsByTagName('coordinates')[0]?.textContent.trim();
+            if (!coordinatesText) return;
+            
+            const points = coordinatesText.split(/\s+/).map(coord => {
+                const parts = coord.split(',');
+                if (parts.length >= 2) {
+                    const lng = parseFloat(parts[0]);
+                    const lat = parseFloat(parts[1]);
+                    if (!isNaN(lng) && !isNaN(lat)) {
+                        return [lat, lng];
+                    }
+                }
+                return null;
+            }).filter(point => point !== null);
+            
+            if (points.length < 2) return;
+            
+            // Apply style if available
+            const lineOptions = {
+                color: style.line?.color || '#3388ff',
+                weight: style.line?.width || 3,
+                opacity: 1
+            };
+            
+            const polyline = L.polyline(points, lineOptions);
+            if (name || description) {
+                const popupContent = `<b>${name}</b>${description ? '<br>' + description : ''}`;
+                polyline.bindPopup(popupContent);
+            }
+            
+            polyline.addTo(parentLayer);
+        }
+        
+        // Process Polygon
+        function processPolygon(polygon, name, description, style, parentLayer) {
+            const outerBoundary = polygon.getElementsByTagName('outerBoundaryIs')[0];
+            if (!outerBoundary) return;
+            
+            const linearRing = outerBoundary.getElementsByTagName('LinearRing')[0];
+            if (!linearRing) return;
+            
+            const coordinatesText = linearRing.getElementsByTagName('coordinates')[0]?.textContent.trim();
+            if (!coordinatesText) return;
+            
+            const outerPoints = coordinatesText.split(/\s+/).map(coord => {
+                const parts = coord.split(',');
+                if (parts.length >= 2) {
+                    const lng = parseFloat(parts[0]);
+                    const lat = parseFloat(parts[1]);
+                    if (!isNaN(lng) && !isNaN(lat)) {
+                        return [lat, lng];
+                    }
+                }
+                return null;
+            }).filter(point => point !== null);
+            
+            if (outerPoints.length < 3) return;
+            
+            // Get inner boundaries (holes)
+            const innerBoundaries = polygon.getElementsByTagName('innerBoundaryIs');
+            const holes = [];
+            
+            for (let i = 0; i < innerBoundaries.length; i++) {
+                const innerRing = innerBoundaries[i].getElementsByTagName('LinearRing')[0];
+                if (!innerRing) continue;
+                
+                const innerCoordinatesText = innerRing.getElementsByTagName('coordinates')[0]?.textContent.trim();
+                if (!innerCoordinatesText) continue;
+                
+                const innerPoints = innerCoordinatesText.split(/\s+/).map(coord => {
+                    const parts = coord.split(',');
+                    if (parts.length >= 2) {
+                        const lng = parseFloat(parts[0]);
+                        const lat = parseFloat(parts[1]);
+                        if (!isNaN(lng) && !isNaN(lat)) {
+                            return [lat, lng];
+                        }
+                    }
+                    return null;
+                }).filter(point => point !== null);
+                
+                if (innerPoints.length >= 3) {
+                    holes.push(innerPoints);
+                }
+            }
+            
+            // Apply style if available
+            const polygonOptions = {
+                color: style.line?.color || '#3388ff',
+                weight: style.line?.width || 2,
+                fillColor: style.poly?.color || style.line?.color || '#3388ff',
+                fillOpacity: style.poly?.fill !== false ? 0.2 : 0,
+                stroke: style.poly?.outline !== false
+            };
+            
+            // Create polygon with holes
+            const poly = L.polygon([outerPoints, ...holes], polygonOptions);
+            
+            if (name || description) {
+                const popupContent = `<b>${name}</b>${description ? '<br>' + description : ''}`;
+                poly.bindPopup(popupContent);
+            }
+            
+            poly.addTo(parentLayer);
+        }
+        
+        // Helper function to get icon href, handling KMZ resources
+        function getIconHref(href, isKmz) {
+            if (!href) return null;
+            
+            // If this is a KMZ and we have the resource
+            if (isKmz && window.kmzResources) {
+                // Try direct match
+                if (window.kmzResources[href]) {
+                    return window.kmzResources[href];
+                }
+                
+                // Try without leading path (some KML files use relative paths)
+                const fileName = href.split('/').pop();
+                for (const key in window.kmzResources) {
+                    if (key.endsWith(fileName)) {
+                        return window.kmzResources[key];
+                    }
+                }
+            }
+            
+            // Return original href if not found in resources
+            return href;
+        }
+        
+        // Helper function to parse KML color format (aabbggrr) to HTML/CSS color format (#rrggbb)
+        function parseKmlColor(kmlColor) {
+            if (!kmlColor || kmlColor.length !== 8) {
+                return '#3388ff'; // Default blue color
+            }
+            
+            // KML format: aabbggrr (alpha, blue, green, red)
+            // HTML format: #rrggbb
+            const alpha = kmlColor.substr(0, 2);
+            const blue = kmlColor.substr(2, 2);
+            const green = kmlColor.substr(4, 2);
+            const red = kmlColor.substr(6, 2);
+            
+            // Convert alpha to opacity (0-1)
+            const opacity = parseInt(alpha, 16) / 255;
+            
+            // Return color in HTML format with opacity
+            return `#${red}${green}${blue}`;
+        }
+        
+        // Function to process and display DXF file
+        function processDxfFile(file) {
+            // Remove existing DXF layer if any
+            if (dxfLayer && window.reperMap) {
+                window.reperMap.removeLayer(dxfLayer);
+            }
+            
+            const reader = new FileReader();
+            
+            reader.onload = function(e) {
+                try {
+                    // Parse the DXF file
+                    const parser = new DxfParser();
+                    const dxf = parser.parseSync(e.target.result);
+                    
+                    // Create a new feature group to hold all DXF elements
+                    dxfLayer = L.featureGroup();
+                    
+                    // Define the LKS-92 / Latvia TM projection (EPSG:3059)
+                    const lks92Proj = '+proj=tmerc +lat_0=0 +lon_0=24 +k=0.9996 +x_0=500000 +y_0=-6000000 +ellps=GRS80 +towgs84=0,0,0,0,0,0,0 +units=m +no_defs';
+                    const wgs84Proj = '+proj=longlat +datum=WGS84 +no_defs';
+                    
+                    // Function to transform coordinates from LKS-92 to WGS84
+                    function transformCoords(x, y) {
+                        const wgs84Coords = proj4(lks92Proj, wgs84Proj, [x, y]);
+                        return [wgs84Coords[1], wgs84Coords[0]]; // [lat, lng] for Leaflet
+                    }
+                    
+                    // Process entities
+                    if (dxf.entities) {
+                        dxf.entities.forEach(entity => {
+                            let feature = null;
+                            
+                            // Handle different entity types
+                            if (entity.type === 'LINE') {
+                                // Create a line
+                                const start = transformCoords(entity.vertices[0].x, entity.vertices[0].y);
+                                const end = transformCoords(entity.vertices[1].x, entity.vertices[1].y);
+                                
+                                feature = L.polyline([start, end], {
+                                    color: '#3388ff',
+                                    weight: 2
+                                });
+                            } 
+                            else if (entity.type === 'LWPOLYLINE' || entity.type === 'POLYLINE') {
+                                // Create a polyline
+                                const points = entity.vertices.map(v => transformCoords(v.x, v.y));
+                                
+                                if (entity.shape === true || (entity.closed === true)) {
+                                    // Closed polyline as polygon
+                                    feature = L.polygon(points, {
+                                        color: '#3388ff',
+                                        weight: 2,
+                                        fillOpacity: 0.2
+                                    });
+                                } else {
+                                    // Open polyline
+                                    feature = L.polyline(points, {
+                                        color: '#3388ff',
+                                        weight: 2
+                                    });
+                                }
+                            }
+                            else if (entity.type === 'CIRCLE') {
+                                // Create a circle
+                                const center = transformCoords(entity.center.x, entity.center.y);
+                                
+                                feature = L.circle(center, {
+                                    radius: entity.radius * 100, // Convert to meters (approximate)
+                                    color: '#3388ff',
+                                    weight: 2,
+                                    fillOpacity: 0.2
+                                });
+                            }
+                            else if (entity.type === 'ARC') {
+                                // Approximate an arc with a polyline
+                                const center = { x: entity.center.x, y: entity.center.y };
+                                const radius = entity.radius;
+                                const startAngle = entity.startAngle;
+                                const endAngle = entity.endAngle;
+                                
+                                // Create points along the arc
+                                const points = [];
+                                const segments = 32; // Number of segments to approximate the arc
+                                
+                                for (let i = 0; i <= segments; i++) {
+                                    const angle = startAngle + (endAngle - startAngle) * (i / segments);
+                                    const x = center.x + radius * Math.cos(angle);
+                                    const y = center.y + radius * Math.sin(angle);
+                                    points.push(transformCoords(x, y));
+                                }
+                                
+                                feature = L.polyline(points, {
+                                    color: '#3388ff',
+                                    weight: 2
+                                });
+                            }
+                            else if (entity.type === 'TEXT') {
+                                // Create a text marker
+                                const position = transformCoords(entity.position.x, entity.position.y);
+                                
+                                feature = L.marker(position, {
+                                    icon: L.divIcon({
+                                        html: `<div style="color:#3388ff;font-size:12px;">${entity.text}</div>`,
+                                        className: 'dxf-text'
+                                    })
+                                });
+                            }
+                            
+                            // Add the feature to the layer if it was created
+                            if (feature) {
+                                dxfLayer.addLayer(feature);
+                            }
+                        });
+                    }
+                    
+                    // Add the DXF layer to the map
+                    if (window.reperMap) {
+                        dxfLayer.addTo(window.reperMap);
+                        
+                        // Try to fit the map to the DXF bounds
+                        try {
+                            const bounds = dxfLayer.getBounds();
+                            if (bounds.isValid()) {
+                                window.reperMap.fitBounds(bounds);
+                            }
+                        } catch (error) {
+                            console.error("Error fitting to DXF bounds:", error);
+                        }
+                    }
+                    
+                    alert('DXF fails veiksmīgi pievienots kartei!');
+                } catch (error) {
+                    console.error("Error processing DXF file:", error);
+                    alert('Kļūda apstrādājot DXF failu: ' + error.message);
+                }
+            };
+            
+            reader.onerror = function() {
+                alert('Kļūda nolasot failu!');
+            };
+            
+            reader.readAsText(file);
+        }
+
+        function processData() {
+            const fileInput = document.getElementById('csvFile');
+            const file = fileInput.files[0];
+            
+            if (!file) {
+                alert('Lūdzu, izvēlieties CSV vai Excel failu!');
+                return;
+            }
+            
+            const fileName = file.name.toLowerCase();
+            if (fileName.endsWith('.csv')) {
+                Papa.parse(file, {
+                    delimiter: ';',
+                    skipEmptyLines: true,
+                    complete: function(results) {
+                        handleParsedData(results.data);
+                        
+                        // Pēc datu apstrādes pārbaudām, vai ir izvēlēts kartes fails
+                        checkAndProcessGeoFile();
+                    }
+                });
+            } else if (fileName.endsWith('.xlsx') || fileName.endsWith('.xls')) {
+                const reader = new FileReader();
+                reader.onload = function(e) {
+                    const data = new Uint8Array(e.target.result);
+                    const workbook = XLSX.read(data, { type: 'array' });
+                    const firstSheet = workbook.Sheets[workbook.SheetNames[0]];
+                    const parsed = XLSX.utils.sheet_to_json(firstSheet, { header: 1, blankrows: false });
+                    handleParsedData(parsed);
+                    
+                    // Pēc datu apstrādes pārbaudām, vai ir izvēlēts kartes fails
+                    checkAndProcessGeoFile();
+                };
+                reader.readAsArrayBuffer(file);
+            } else {
+                alert('Atbalstīti tikai CSV vai Excel faili!');
+            }
+        }
+        
+        // Funkcija, kas pārbauda, vai ir izvēlēts kartes fails un apstrādā to
+        function checkAndProcessGeoFile() {
+            const geoFileInput = document.getElementById('geoFile');
+            const geoFile = geoFileInput.files[0];
+            
+            if (geoFile) {
+                const fileName = geoFile.name.toLowerCase();
+                
+                if (fileName.endsWith('.dxf')) {
+                    processDxfFile(geoFile);
+                } else if (fileName.endsWith('.kmz')) {
+                    processKmzFile(geoFile);
+                } else if (fileName.endsWith('.kml')) {
+                    processKmlFile(geoFile);
+                }
+            }
+        }
+        
+        function handleParsedData(data) {
+            if (data.length < 2) {
+                alert('Nepietiekams datu apjoms failā!');
+                return;
+            }
+            const header = data[0];
+            const dataRows = data.slice(1);
+            let columns = header.slice();
+            columns[2] = 'Repers';
+            const dates = [];
+            for (let i = 3; i < columns.length; i++) {
+                const d = columns[i];
+                dates.push(d ? d.trim() : "");
+            }
+            const all_x_coords = [];
+            const all_y_coords = [];
+            const all_reper_names = [];
+            const all_deformation_values = [];
+            const missingCoordsReperes = [];
+
+            for (let i = 0; i < dataRows.length; i++) {
+                const x = dataRows[i][0];
+                const y = dataRows[i][1];
+                const reperName = dataRows[i][2];
+
+                // Check if coordinates are missing or invalid
+                if (x === undefined || y === undefined || x === "" || y === "" || isNaN(parseFloat(x)) || isNaN(parseFloat(y))) {
+                    missingCoordsReperes.push(reperName);
+                    all_x_coords.push(null);
+                    all_y_coords.push(null);
+                } else {
+                    all_x_coords.push(parseFloat(x));
+                    all_y_coords.push(parseFloat(y));
+                }
+
+                all_reper_names.push(reperName);
+                const values = [];
+                for (let j = 3; j < columns.length; j++) {
+                    let val = dataRows[i][j];
+                    if (val === undefined || val === "" || val === "nepieejams" || val === "iznīcināts") {
+                        values.push(null);
+                    } else {
+                        values.push(parseFloat(val.toString().replace(',', '.')));
+                    }
+                }
+                while (values.length < dates.length) {
+                    values.push(null);
+                }
+                all_deformation_values.push(values);
+            }
+
+            // Display missing coordinates list if any
+            const missingCoordsDiv = document.getElementById('missingCoords');
+            if (missingCoordsReperes.length > 0) {
+                missingCoordsDiv.innerHTML = `
+                    <h4>Reperi bez koordinātēm:</h4>
+                    <ul>
+                        ${missingCoordsReperes.map(reper => `<li>${reper}</li>`).join('')}
+                    </ul>
+                `;
+            } else {
+                missingCoordsDiv.innerHTML = '';
+            }
+
+            // Katram reperim individuāli atrodam pirmo derīgo vērtību kā bāzi
+            const deform_first_valid_all = [];
+            for (let i = 0; i < all_deformation_values.length; i++) {
+                const row = all_deformation_values[i];
+                
+                // Atrodam pirmo derīgo vērtību šim reperim
+                let baseValue = null;
+                for (let j = 0; j < row.length; j++) {
+                    if (row[j] !== null && !isNaN(row[j])) {
+                        baseValue = row[j];
+                        break;
+                    }
+                }
+                
+                // Aprēķinām deformācijas attiecībā pret šo bāzes vērtību
+                const deformRow = [];
+                for (let j = 0; j < row.length; j++) {
+                    if (row[j] === null || baseValue === null || isNaN(row[j]) || isNaN(baseValue)) {
+                        deformRow.push(null);
+                    } else {
+                        deformRow.push(row[j] - baseValue);
+                    }
+                }
+                deform_first_valid_all.push(deformRow);
+            }
+
+            // Filtrējam tikai tos reperus, kuriem ir derīgas koordinātes
+            const validIndices = [];
+            for (let i = 0; i < all_x_coords.length; i++) {
+                if (
+                    all_x_coords[i] !== null &&
+                    all_y_coords[i] !== null &&
+                    !isNaN(all_x_coords[i]) &&
+                    !isNaN(all_y_coords[i])
+                ) {
+                    validIndices.push(i);
+                }
+            }
+
+            const filtered_dates = dates;
+            const filtered_reper_names = validIndices.map(i => all_reper_names[i]);
+            const filtered_deform_first_valid_all = validIndices.map(i => deform_first_valid_all[i]);
+            const filtered_x_coords = validIndices.map(i => all_x_coords[i]);
+            const filtered_y_coords = validIndices.map(i => all_y_coords[i]);
+
+            // Saglabājam reperu vārdus globāli sinhronizācijai
+            window._all_reper_names = all_reper_names;
+            window._filtered_reper_names = filtered_reper_names;
+            
+            // Saglabājam datus par mērījumiem globāli, lai tos varētu izmantot popup logā
+            window.all_deformation_values = all_deformation_values;
+            window.dates = dates;
+
+            // Deformāciju grafikā rāda VISUS reperus, kartē tikai ar koordinātēm
+            createFirstValidChart(dates, all_reper_names, deform_first_valid_all);
+            createReperMap(filtered_x_coords, filtered_y_coords, filtered_reper_names, all_reper_names, all_deformation_values, dates);
+
+            document.getElementById('results').classList.remove('hidden');
+            // Parāda lejupielādes pogu
+            document.getElementById('downloadHtmlBtn').classList.remove('hidden');
+            return;
+        }
+        
+        function createFirstValidChart(dates, reperNames, data) {
+            const traces = [];
+            
+            // Izveido traces tieši kā Python kodā
+            for (let i = 0; i < reperNames.length; i++) {
+                const trace = {
+                    x: dates,
+                    y: data[i],
+                    mode: 'lines+markers',
+                    name: reperNames[i],
+                    connectgaps: false
+                };
+                
+                traces.push(trace);
+            }
+            
+            // Pārbaude vai ir dati grafikam
+            if (traces.length === 0) {
+                document.getElementById('chart1').innerHTML = '<p style="color:red">Nav datu, ko attēlot grafikā!</p>';
+                return;
+            }
+            
+            // Noformēšana tieši kā Python kodā
+            const layout = {
+                title: 'Deformācija attiecībā pret pirmo derīgo ciklu (visi reperi)',
+                xaxis: {
+                    title: {
+                        text: 'Uzmērīšanas datums',
+                        font: {
+                            size: 14
+                        },
+                        standoff: 5
+                    },
+                    tickangle: 45
+                },
+                yaxis: {
+                    title: {
+                        text: 'Deformācija, m',
+                        font: {
+                            size: 14
+                        },
+                        standoff: 15
+                    },
+                    tickformat: '.3f',
+                    side: 'right'
+                },
+                hovermode: 'closest',
+                template: 'plotly_white',
+                autosize: true,
+                width: null,
+                height: null,
+                margin: {
+                    b: 150,
+                    t: 50,
+                    l: 120,
+                    r: 80
+                },
+                legend: {
+                    orientation: 'v',
+                    x: 0,
+                    y: 1,
+                    xanchor: 'right',
+                    yanchor: 'top'
+                }
+            };
+            
+            const config = {
+                responsive: true,
+                displayModeBar: true,
+                scrollZoom: false
+            };
+            
+            // Izveidojam grafiku
+            Plotly.newPlot('chart1', traces, layout, config);
+            
+            // Add event listener for restyle (sync only for common traces)
+            document.getElementById('chart1').on('plotly_restyle', function() {
+                if (isSyncing) return;
+                isSyncing = true;
+                syncVisibility('chart1', 'map', window._all_reper_names, window._filtered_reper_names);
+                isSyncing = false;
+            });
+            
+            // Saglabājam grafiku, lai vēlāk varētu lejupielādēt
+            chartData.chart1 = {
+                traces: traces,
+                layout: layout,
+                filename: 'deformacija_visi_reperi_pret_derigo_ciklu.html'
+            };
+        }
+        
+        function createReperMap(xCoords, yCoords, reperNames, allReperNames, allDeformationValues, dates) {
+            // Define default colors for reperes
+            const defaultColors = [
+                '#1f77b4',  // blue
+                '#ff7f0e',  // orange
+                '#2ca02c',  // green
+                '#d62728',  // red
+                '#9467bd',  // purple
+                '#8c564b',  // brown
+                '#e377c2',  // pink
+                '#7f7f7f',  // gray
+                '#bcbd22',  // olive
+                '#17becf'   // cyan
+            ];
+            
+            // Filter out null coordinates
+            const validPoints = [];
+            for (let i = 0; i < xCoords.length; i++) {
+                if (xCoords[i] !== null && yCoords[i] !== null) {
+                    validPoints.push({
+                        x: xCoords[i],
+                        y: yCoords[i],
+                        name: reperNames[i],
+                        color: defaultColors[i % defaultColors.length]
+                    });
+                }
+            }
+            
+            // Calculate bounds for the map
+            let minX, maxX, minY, maxY;
+            if (validPoints.length > 0) {
+                minX = Math.min(...validPoints.map(p => p.x));
+                maxX = Math.max(...validPoints.map(p => p.x));
+                minY = Math.min(...validPoints.map(p => p.y));
+                maxY = Math.max(...validPoints.map(p => p.y));
+                
+                // Add padding around the bounds
+                const paddingX = (maxX - minX) * 0.1;
+                const paddingY = (maxY - minY) * 0.1;
+                minX -= paddingX;
+                maxX += paddingX;
+                minY -= paddingY;
+                maxY += paddingY;
+            } else {
+                // Default bounds if no valid coordinates
+                minX = 0;
+                maxX = 1000;
+                minY = 0;
+                maxY = 1000;
+            }
+
+            // Clear existing map if it exists
+            if (window.reperMap) {
+                window.reperMap.remove();
+            }
+            
+            // Remove the map container and recreate it to ensure clean initialization
+            const mapContainer = document.getElementById('map');
+            if (mapContainer) {
+                const parent = mapContainer.parentNode;
+                const newMapContainer = document.createElement('div');
+                newMapContainer.id = 'map';
+                newMapContainer.style.width = '100%';
+                newMapContainer.style.height = '60vh';
+                parent.replaceChild(newMapContainer, mapContainer);
+            }
+            
+            // Create map with EPSG:3059 CRS support (Latvian coordinate system)
+            // Define the LKS-92 / Latvia TM projection (EPSG:3059)
+            const lks92Proj = '+proj=tmerc +lat_0=0 +lon_0=24 +k=0.9996 +x_0=500000 +y_0=-6000000 +ellps=GRS80 +towgs84=0,0,0,0,0,0,0 +units=m +no_defs';
+            
+            // Create a custom CRS for Leaflet
+            const map = L.map('map', {
+                crs: L.CRS.EPSG3857, // We'll still use Web Mercator for the base map display
+                zoomControl: true,
+                minZoom: 7,
+                maxZoom: 20
+            });
+            
+            // Store map reference globally
+            window.reperMap = map;
+            
+            // Define base layers
+            const baseLayers = {
+                "OpenStreetMap": L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+                    maxZoom: 20
+                }).addTo(map),
+                "ESRI Ortofoto": L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+                    attribution: 'Tiles &copy; Esri &mdash; Source: Esri, i-cubed, USDA, USGS, AEX, GeoEye, Getmapping, Aerogrid, IGN, IGP, UPR-EGP, and the GIS User Community',
+                    maxZoom: 20
+                }),
+                "Google Ortofoto": L.tileLayer('https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}', {
+                    attribution: 'Map data &copy; Google',
+                    maxZoom: 20
+                }),
+                "LVM Ortofoto": L.tileLayer.wms('https://lvmgeoserver.lvm.lv/geoserver/ows', {
+                    layers: 'public:Orto_LKS',
+                    format: 'image/png',
+                    transparent: true,
+                    maxZoom: 20,
+                    version: '1.3.0',
+                    crs: L.CRS.EPSG3857
+                })
+            };
+            
+            // Define overlay layers
+            const overlays = {
+                // Removed Kadastra karte layer as requested
+            };
+            
+            // Add layer control to the map
+            L.control.layers(baseLayers, overlays, {position: 'topright', collapsed: false}).addTo(map);
+            
+            // Function to accurately convert LKS-92 coordinates to WGS84 using proj4js
+            function lks92ToWgs84(x, y) {
+                // Define the projection strings
+                const epsg3059 = "+proj=tmerc +lat_0=0 +lon_0=24 +k=0.9996 +x_0=500000 +y_0=-6000000 +ellps=GRS80 +towgs84=0,0,0,0,0,0,0 +units=m +no_defs";
+                const epsg4326 = "+proj=longlat +datum=WGS84 +no_defs";
+                
+                // Use proj4js to transform from LKS-92 to WGS84
+                // Output is [longitude, latitude] but Leaflet expects [latitude, longitude]
+                const lonlat = proj4(epsg3059, epsg4326, [x, y]);
+                
+                // Return in Leaflet format [lat, lon]
+                return [lonlat[1], lonlat[0]];
+            }
+            
+            // Store marker references for interactivity
+            window.reperMarkers = {};
+            
+            // Create a Leaflet feature group to hold all markers for easy bounds fitting
+            const markersGroup = L.featureGroup().addTo(map);
+            
+            // Add markers for each valid point
+            validPoints.forEach((point, idx) => {
+                // Convert LKS-92 coordinates to WGS84
+                // Log original coordinates for debugging
+                console.log(`Original coordinates (LKS-92): X=${point.x}, Y=${point.y}`);
+                
+                const latLng = lks92ToWgs84(point.x, point.y);
+                
+                // Log transformed coordinates for debugging
+                console.log(`Transformed coordinates (WGS84): Lat=${latLng[0]}, Lng=${latLng[1]}`);
+                
+                const marker = L.circleMarker(latLng, {
+                    color: point.color,
+                    fillColor: point.color,
+                    fillOpacity: 0.7,
+                    radius: 8
+                }).addTo(markersGroup);
+                
+                marker.bindTooltip(point.name, {
+                    permanent: true,
+                    direction: 'top',
+                    offset: L.point(0, -10)
+                });
+                
+                // Get last three measurement values for this reper
+                const reperIndex = allReperNames.indexOf(point.name);
+                let lastThreeValues = [];
+                let lastThreeDates = [];
+                
+                if (reperIndex !== -1) {
+                    const values = allDeformationValues[reperIndex];
+                    const validValues = [];
+                    const validDates = [];
+                    
+                    // Collect valid values and their dates
+                    for (let i = values.length - 1; i >= 0; i--) {
+                        if (values[i] !== null && !isNaN(values[i])) {
+                            validValues.push(values[i]);
+                            validDates.push(dates[i]);
+                            if (validValues.length >= 3) break;
+                        }
+                    }
+                    
+                    lastThreeValues = validValues.reverse();
+                    lastThreeDates = validDates.reverse();
+                }
+                
+                // Create popup content with measurement data
+                let popupContent = `<b>${point.name}</b>`;
+                
+                if (lastThreeValues.length > 0) {
+                    popupContent += '<br><br><b>Pēdējie uzmērījumi:</b>';
+                    popupContent += '<table style="width:100%; border-collapse:collapse;">';
+                    popupContent += '<tr><th style="text-align:left; border-bottom:1px solid #ddd;">Datums</th><th style="text-align:right; border-bottom:1px solid #ddd;">Vērtība</th></tr>';
+                    
+                    for (let i = 0; i < lastThreeValues.length; i++) {
+                        popupContent += `<tr><td style="text-align:left;">${lastThreeDates[i]}</td><td style="text-align:right;">${lastThreeValues[i].toFixed(3)}</td></tr>`;
+                    }
+                    
+                    popupContent += '</table>';
+                }
+                
+                marker.bindPopup(popupContent);
+                
+                // Store marker reference with reper name
+                window.reperMarkers[point.name] = {
+                    marker: marker,
+                    visible: true,
+                    name: point.name,
+                    color: point.color,
+                    originalX: point.x,
+                    originalY: point.y
+                };
+            });
+            
+            // Fit map bounds to markers with padding
+            if (validPoints.length > 0) {
+                try {
+                    // Force multiple redraws to ensure proper sizing
+                    map.invalidateSize();
+
+                    // Wait a bit and force another redraw
+                    setTimeout(() => {
+                        map.invalidateSize(true);
+                        
+                        const bounds = markersGroup.getBounds();
+                        if (bounds.isValid()) {
+                            map.fitBounds(bounds, { padding: [50, 50], maxZoom: 15 });
+                            
+                            // Final forced redraw after bounds are set
+                            setTimeout(() => {
+                                map.invalidateSize(true);
+                            }, 200);
+                } else {
+                            map.setView([56.879, 24.603], 7); // Default center of Latvia
+                        }
+                    }, 300);
+                } catch (e) {
+                    console.error("Error fitting bounds:", e);
+                    map.setView([56.879, 24.603], 7);
+                }
+            } else {
+                map.setView([56.879, 24.603], 7); // Default center of Latvia
+                map.invalidateSize(true);
+            }
+            
+            // Update global references for syncing with chart1
+            window._map_markers_refs = window.reperMarkers;
+            window._filtered_reper_names = validPoints.map(p => p.name);
+        }
+        
+        function downloadChart(chartNumber) {
+            const chart = chartData[`chart${chartNumber}`];
+            if (!chart) return;
+            
+            // Iegūstam aktuālo grafika stāvokli
+            const chartDiv = document.getElementById(`chart${chartNumber}`);
+            const currentTraces = [];
+            
+            if (chartDiv && chartDiv.data) {
+                for (let i = 0; i < chartDiv.data.length; i++) {
+                    // Iekļaujam tikai redzamos traces
+                    const trace = JSON.parse(JSON.stringify(chartDiv.data[i]));
+                    currentTraces.push(trace);
+                }
+            }
+            
+            // Tikai rezultātu sadaļa (bez augšupielādes un pogām)
+            const htmlParts = [];
+            htmlParts.push('<!DOCTYPE html>');
+            htmlParts.push('<html lang="lv">');
+            htmlParts.push('<head>');
+            htmlParts.push('    <meta charset="UTF-8">');
+            htmlParts.push('    <title>' + chart.layout.title + '</title>');
+            htmlParts.push('    <script src="https://cdn.plot.ly/plotly-3.0.1.min.js"><\/script>');
+            htmlParts.push('    <style>body { font-family: Arial, sans-serif; max-width: 1200px; margin: 0 auto; padding: 20px; } .chart { max-width: 1200px; height: 60vh; padding: 10px; box-sizing: border-box; }</style>');
+            htmlParts.push('</head>');
+            htmlParts.push('<body>');
+            htmlParts.push('    <h2>' + chart.layout.title + '</h2>');
+            htmlParts.push('    <div id="chart" class="chart"></div>');
+            htmlParts.push('    <script>');
+            htmlParts.push('        const traces = ' + JSON.stringify(currentTraces.length > 0 ? currentTraces : chart.traces) + ';');
+            htmlParts.push('        const layout = ' + JSON.stringify(chart.layout) + ';');
+            htmlParts.push('        const config = {responsive: true};');
+            htmlParts.push('        Plotly.newPlot("chart", traces, layout, config);');
+            htmlParts.push('    <\/script>');
+            htmlParts.push('</body>');
+            htmlParts.push('</html>');
+            
+            const html = htmlParts.join('\n');
+            
+            // Izveidojam Blob un lejupielādes saiti
+            const blob = new Blob([html], { type: 'text/html' });
+            const url = window.URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = chart.filename;
+            document.body.appendChild(a);
+            a.click();
+            
+            // Aizvācam elementu un atbrīvojam URL
+            setTimeout(() => {
+                document.body.removeChild(a);
+                window.URL.revokeObjectURL(url);
+            }, 0);
+        }
+
+        // Funkcija, kas sinhronizē tikai kopīgos slāņus pēc vārda
+        function syncVisibility(sourceChartId, targetChartId, sourceNames, targetNames) {
+            // If syncing from chart1 to map
+            if (sourceChartId === 'chart1' && targetChartId === 'map') {
+                if (!window.reperMap || !window._map_markers_refs) return;
+
+                const sourceData = document.getElementById(sourceChartId).data;
+
+                // For each marker in the map, check if it should be visible based on chart1
+                for (const reperName in window._map_markers_refs) {
+                    const reperInfo = window._map_markers_refs[reperName];
+                    const sourceIdx = sourceNames.indexOf(reperName);
+                    
+                    if (sourceIdx !== -1 && sourceData[sourceIdx]) {
+                        const shouldBeVisible = sourceData[sourceIdx].visible !== 'legendonly';
+                        
+                        if (shouldBeVisible && !reperInfo.visible) {
+                            // Show marker if it was hidden
+                            window.reperMap.addLayer(reperInfo.marker);
+                            reperInfo.visible = true;
+                            
+                        } else if (!shouldBeVisible && reperInfo.visible) {
+                            // Hide marker if it was visible
+                            window.reperMap.removeLayer(reperInfo.marker);
+                            reperInfo.visible = false;
+                            
+                        }
+                    }
+                }
+            } 
+            // If syncing from map to chart1 (this part not implemented yet)
+            else if (sourceChartId === 'map' && targetChartId === 'chart1') {
+                // This would require click handlers on the map legend items
+                // which is not implemented in the current version
+            }
+            // Original Plotly-to-Plotly sync for chart1 only
+            else {
+            const sourceData = document.getElementById(sourceChartId).data;
+            const targetData = document.getElementById(targetChartId).data;
+            const newVisibility = targetData.map((trace, i) => {
+                const name = targetNames[i];
+                const sourceIdx = sourceNames.indexOf(name);
+                if (sourceIdx !== -1 && sourceData[sourceIdx]) {
+                    return sourceData[sourceIdx].visible;
+                }
+                // Ja nav kopīgs slānis, atstāj pašreizējo redzamību vai true, ja nav definēts
+                return typeof trace.visible !== 'undefined' ? trace.visible : true;
+            });
+            // Tikai ja ir vismaz viens kopīgs slānis, veic restyle
+            if (newVisibility.some((v, i) => v !== targetData[i].visible)) {
+                Plotly.restyle(targetChartId, {visible: newVisibility});
+                }
+            }
+        }
+
+        // New function to download the full results section as interactive HTML
+        function downloadFullReportHtml() {
+            // Get the results HTML
+            const resultsHtml = document.getElementById('results').innerHTML;
+            // Get chart data and layout for chart1
+            const chart1Div = document.getElementById('chart1');
+            const chart1Data = chart1Div ? JSON.stringify(chart1Div.data) : '[]';
+            const chart1Layout = chart1Div ? JSON.stringify(chart1Div.layout) : '{}';
+            
+            // Get map data from the reperMarkers
+            const mapMarkersData = window._map_markers_refs ? JSON.stringify(
+                Object.values(window._map_markers_refs).map(marker => {
+                    const latlng = marker.marker._latlng;
+                    let originalX, originalY;
+                    let popupContent = null;
+                    
+                    // Extract original coordinates and popup content if available
+                    const popup = marker.marker.getPopup();
+                    if (popup && popup._content) {
+                        popupContent = popup._content;
+                        
+                        // Still extract coordinates for fallback
+                        const match = popup._content.match(/X: ([\d\.]+)<br>Y: ([\d\.]+)/);
+                        if (match) {
+                            originalX = parseFloat(match[1]);
+                            originalY = parseFloat(match[2]);
+                        }
+                    }
+                    
+                    return {
+                        name: marker.name,
+                        color: marker.color,
+                        visible: marker.visible,
+                        position: latlng ? [latlng.lat, latlng.lng] : null,
+                        originalCoords: originalX && originalY ? [originalX, originalY] : null,
+                        popupContent: popupContent
+                    };
+                })
+            ) : '[]';
+
+            // Get KML/KMZ layer data if available
+            let kmlLayerData = null;
+            if (kmlLayer && kmlLayer.getLayers().length > 0) {
+                kmlLayerData = {
+                    type: 'kml',
+                    layers: kmlLayer.getLayers().map(layer => {
+                        const data = {
+                            type: layer instanceof L.Marker ? 'marker' :
+                                  layer instanceof L.Polyline ? 'polyline' :
+                                  layer instanceof L.Polygon ? 'polygon' :
+                                  layer instanceof L.ImageOverlay ? 'imageOverlay' : 'unknown'
+                        };
+
+                        if (data.type === 'marker') {
+                            data.latlng = layer.getLatLng();
+                            if (layer.getIcon()) {
+                                data.icon = {
+                                    iconUrl: layer.getIcon().options.iconUrl,
+                                    iconSize: layer.getIcon().options.iconSize
+                                };
+                            }
+                        } else if (data.type === 'polyline' || data.type === 'polygon') {
+                            data.latlngs = layer.getLatLngs();
+                            data.options = {
+                                color: layer.options.color,
+                                weight: layer.options.weight,
+                                fillColor: layer.options.fillColor,
+                                fillOpacity: layer.options.fillOpacity
+                            };
+                        } else if (data.type === 'imageOverlay') {
+                            data.bounds = layer.getBounds();
+                            data.url = layer._url;
+                        }
+
+                        if (layer.getTooltip()) {
+                            data.tooltip = {
+                                content: layer.getTooltip()._content,
+                                options: layer.getTooltip().options
+                            };
+                        }
+
+                        if (layer.getPopup()) {
+                            data.popup = {
+                                content: layer.getPopup()._content,
+                                options: layer.getPopup().options
+                            };
+                        }
+
+                        return data;
+                    })
+                };
+            }
+            
+            // Get reper name arrays for sync
+            const allReperNames = window._all_reper_names ? JSON.stringify(window._all_reper_names) : '[]';
+            const filteredReperNames = window._filtered_reper_names ? JSON.stringify(window._filtered_reper_names) : '[]';
+            
+            // Get measurement data for popups
+            const allDeformationValues = window.all_deformation_values ? JSON.stringify(window.all_deformation_values) : '[]';
+            const allDates = window.dates ? JSON.stringify(window.dates) : '[]';
+            
+            // Capture the current state of DXF and KML layers
+            const hasGeoLayers = (dxfLayer && dxfLayer.getLayers().length > 0) || 
+                               (kmlLayer && kmlLayer.getLayers().length > 0);
+            
+            // Serialize KML resources if available
+            const kmzResourcesData = window.kmzResources ? JSON.stringify(window.kmzResources) : '{}';
+
+            // Serialize KML layer styles if available
+            let kmlStylesData = {};
+            if (kmlLayer) {
+                kmlLayer.eachLayer(layer => {
+                    if (layer.options) {
+                        const styleId = layer._leaflet_id;
+                        kmlStylesData[styleId] = {
+                            color: layer.options.color,
+                            weight: layer.options.weight,
+                            opacity: layer.options.opacity,
+                            fillColor: layer.options.fillColor,
+                            fillOpacity: layer.options.fillOpacity,
+                            dashArray: layer.options.dashArray
+                        };
+                    }
+                });
+            }
+
+            // Build a standalone HTML file
+            const htmlParts = [];
+            htmlParts.push('<!DOCTYPE html>');
+            htmlParts.push('<html lang="lv">');
+            htmlParts.push('<head>');
+            htmlParts.push('    <meta charset="UTF-8">');
+            htmlParts.push('    <title>Deformāciju analīzes atskaite</title>');
+            htmlParts.push('    <script src="https://cdn.plot.ly/plotly-3.0.1.min.js"><\/script>');
+            htmlParts.push('    <script src="https://cdnjs.cloudflare.com/ajax/libs/proj4js/2.8.1/proj4.min.js"><\/script>');
+            htmlParts.push('    <script src="https://unpkg.com/dxf-parser@1.1.2/dist/dxf-parser.js"><\/script>');
+            htmlParts.push('    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"><\/script>');
+            htmlParts.push('    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin=""/>');
+            htmlParts.push('    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""><\/script>');
+            htmlParts.push('    <style>');
+            htmlParts.push('        body { font-family: Arial, sans-serif; max-width: 1200px; margin: 0 auto; padding: 20px; }');
+            htmlParts.push('        .chart { max-width: 1200px; height: 60vh; padding: 10px; box-sizing: border-box; }');
+            htmlParts.push('        .charts-container { display: flex; flex-direction: column; gap: 30px; }');
+            htmlParts.push('        .missing-coords { margin-top: 20px; padding: 15px; background-color: #f8f9fa; border-radius: 4px; }');
+            htmlParts.push('        .missing-coords h4 { margin-top: 0; color: #dc3545; }');
+            htmlParts.push('        .missing-coords ul { margin: 0; padding-left: 20px; }');
+            htmlParts.push('        #map { height: 60vh; width: 100%; max-width: 100%; margin: 0 auto; position: relative; z-index: 0; box-sizing: border-box; }');
+            htmlParts.push('        .leaflet-container { z-index: 0; height: 100%; width: 100%; }');
+            htmlParts.push('        .leaflet-control-layers { clear: both; }');
+            htmlParts.push('        .dxf-upload { margin-bottom: 10px; padding: 10px; background-color: #f8f9fa; border-radius: 4px; display: flex; align-items: center; gap: 10px; }');
+            htmlParts.push('        .dxf-upload button { padding: 5px 10px; }');
+            htmlParts.push('        .buttons { display: flex; gap: 10px; margin-top: 10px; }');
+            htmlParts.push('        button { padding: 10px 15px; background-color: #4CAF50; color: white; border: none; cursor: pointer; border-radius: 4px; }');
+            htmlParts.push('        button:hover { background-color: #45a049; }');
+            htmlParts.push('    </style>');
+            htmlParts.push('</head>');
+            htmlParts.push('<body>');
+            htmlParts.push('    <div id="results">');
+            htmlParts.push('        <h2>Rezultāti</h2>');
+            htmlParts.push('        <div class="charts-container">');
+            htmlParts.push('            <div>');
+            htmlParts.push('                <h3>Deformācija attiecībā pret pirmo derīgo ciklu (visi reperi)</h3>');
+            htmlParts.push('                <div id="chart1" class="chart"></div>');
+            htmlParts.push('            </div>');
+            htmlParts.push('            <div>');
+            htmlParts.push('                <h3>Reperu izvietojuma karte</h3>');
+            htmlParts.push('                <div id="map"></div>');
+            htmlParts.push('                <div id="missingCoords" class="missing-coords">' + document.getElementById('missingCoords').innerHTML + '</div>');
+            htmlParts.push('            </div>');
+            htmlParts.push('        </div>');
+            htmlParts.push('    </div>');
+            htmlParts.push('    <script>');
+            htmlParts.push('      window.addEventListener("DOMContentLoaded", function() {');
+            htmlParts.push('        // Initialize chart1');
+            htmlParts.push('        if (window.Plotly) {');
+            htmlParts.push('          Plotly.newPlot("chart1", ' + chart1Data + ', ' + chart1Layout + ', {responsive:true, useResizeHandler:true});');
+            htmlParts.push('        }');
+            htmlParts.push('        // Create map');
+            htmlParts.push('        const mapData = ' + mapMarkersData + ';');
+            
+            // Ensure the map container is fresh and ready
+            htmlParts.push('        // Ensure map container is reset');
+            htmlParts.push('        const mapContainer = document.getElementById("map");');
+            htmlParts.push('        if (mapContainer) {');
+            htmlParts.push('          const parent = mapContainer.parentNode;');
+            htmlParts.push('          const newMapContainer = document.createElement("div");');
+            htmlParts.push('          newMapContainer.id = "map";');
+            htmlParts.push('          newMapContainer.style.width = "100%";');
+            htmlParts.push('          newMapContainer.style.height = "60vh";');
+            htmlParts.push('          parent.replaceChild(newMapContainer, mapContainer);');
+            htmlParts.push('        }');
+            
+            // Define the transformation function
+            htmlParts.push('        // Define coordinate transformation function - LKS-92 to WGS84 using proj4js');
+            htmlParts.push('        function lks92ToWgs84(x, y) {');
+            htmlParts.push('          // Define the projection strings');
+            htmlParts.push('          const epsg3059 = "+proj=tmerc +lat_0=0 +lon_0=24 +k=0.9996 +x_0=500000 +y_0=-6000000 +ellps=GRS80 +towgs84=0,0,0,0,0,0,0 +units=m +no_defs";');
+            htmlParts.push('          const epsg4326 = "+proj=longlat +datum=WGS84 +no_defs";');
+            htmlParts.push('          ');
+            htmlParts.push('          // Use proj4js to transform from LKS-92 to WGS84');
+            htmlParts.push('          const lonlat = proj4(epsg3059, epsg4326, [x, y]);');
+            htmlParts.push('          ');
+            htmlParts.push('          // Return in Leaflet format [lat, lon]');
+            htmlParts.push('          return [lonlat[1], lonlat[0]];');
+            htmlParts.push('        }');
+            
+            htmlParts.push('        const map = L.map("map", {');
+            htmlParts.push('          zoomControl: true,');
+            htmlParts.push('          minZoom: 7,');
+            htmlParts.push('          maxZoom: 20');
+            htmlParts.push('        });');
+            
+            // Force the map to render correctly after initialization
+            htmlParts.push('        // Force the map to render correctly');
+            htmlParts.push('        setTimeout(() => {');
+            htmlParts.push('          map.invalidateSize();');
+            htmlParts.push('        }, 200);');
+            
+            htmlParts.push('        window.reperMap = map;');
+            
+            htmlParts.push('        // Define base layers');
+            htmlParts.push('        const baseLayers = {');
+            htmlParts.push('          "OpenStreetMap": L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {');
+            htmlParts.push('            attribution: \'&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors\',');
+            htmlParts.push('            maxZoom: 20');
+            htmlParts.push('          }).addTo(map),');
+            htmlParts.push('          "Esri Ortofoto": L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}", {');
+            htmlParts.push('            attribution: \'Tiles &copy; Esri &mdash; Source: Esri, i-cubed, USDA, USGS, AEX, GeoEye, Getmapping, Aerogrid, IGN, IGP, UPR-EGP, and the GIS User Community\',');
+            htmlParts.push('            maxZoom: 20');
+            htmlParts.push('          }),');
+            htmlParts.push('          "Google Ortofoto": L.tileLayer("https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}", {');
+            htmlParts.push('            attribution: "Map data &copy; Google",');
+            htmlParts.push('            maxZoom: 20');
+            htmlParts.push('          }),');
+            htmlParts.push('          "LVM Ortofoto": L.tileLayer.wms("https://lvmgeoserver.lvm.lv/geoserver/ows", {');
+            htmlParts.push('            layers: "public:Orto_LKS",');
+            htmlParts.push('            format: "image/png",');
+            htmlParts.push('            transparent: true,');
+            htmlParts.push('            version: "1.3.0",');
+            htmlParts.push('            crs: L.CRS.EPSG3857');
+            htmlParts.push('          })');
+            htmlParts.push('        };');
+            
+            htmlParts.push('        // Define overlay layers');
+            htmlParts.push('        const overlays = {');
+            htmlParts.push('          // Removed Kadastra karte layer as requested');
+            htmlParts.push('        };');
+            
+            htmlParts.push('        // Add layer control to the map');
+            htmlParts.push('        L.control.layers(baseLayers, overlays, {position: "topright", collapsed: false}).addTo(map);');
+            
+            htmlParts.push('        // Store markers');
+            htmlParts.push('        window._map_markers_refs = {};');
+            
+            htmlParts.push('        // Create marker group for bounds');
+            htmlParts.push('        const markersGroup = L.featureGroup().addTo(map);');
+            
+            htmlParts.push('        // Add markers');
+            htmlParts.push('        mapData.forEach(point => {');
+            htmlParts.push('          if (point.position) {');
+            htmlParts.push('            // Convert from LKS-92 to WGS84 using original coordinates if available');
+            htmlParts.push('            let latLng;');
+            htmlParts.push('            if (point.originalCoords) {');
+            htmlParts.push('              // Log original coordinates for debugging');
+            htmlParts.push('              console.log(`Original coordinates (LKS-92): X=${point.originalCoords[0]}, Y=${point.originalCoords[1]}`);');
+            htmlParts.push('              // Use original coords for more accurate transformation');
+            htmlParts.push('              latLng = lks92ToWgs84(point.originalCoords[0], point.originalCoords[1]);');
+            htmlParts.push('              // Log transformed coordinates');
+            htmlParts.push('              console.log(`Transformed coordinates (WGS84): Lat=${latLng[0]}, Lng=${latLng[1]}`);');
+            htmlParts.push('            } else {');
+            htmlParts.push('              // Fallback to stored position (already transformed)');
+            htmlParts.push('              latLng = point.position;');
+            htmlParts.push('            }');
+            htmlParts.push('            const marker = L.circleMarker(latLng, {');
+            htmlParts.push('              color: point.color,');
+            htmlParts.push('              fillColor: point.color,');
+            htmlParts.push('              fillOpacity: 0.7,');
+            htmlParts.push('              radius: 8');
+            htmlParts.push('            }).addTo(markersGroup);');
+            htmlParts.push('            marker.bindTooltip(point.name, {');
+            htmlParts.push('              permanent: true,');
+            htmlParts.push('              direction: "top",');
+            htmlParts.push('              offset: L.point(0, -10)');
+            htmlParts.push('            });');
+            htmlParts.push('            // Create popup content with measurement data');
+            htmlParts.push('            if (point.popupContent) {');
+            htmlParts.push('              marker.bindPopup(point.popupContent);');
+            htmlParts.push('            } else {');
+            htmlParts.push('              // Create a basic popup if no saved content is available');
+            htmlParts.push('              marker.bindPopup(`<b>${point.name}</b>`);');
+            htmlParts.push('            }');
+            htmlParts.push('            // Store marker reference');
+            htmlParts.push('            window._map_markers_refs[point.name] = {');
+            htmlParts.push('              marker: marker,');
+            htmlParts.push('              visible: point.visible,');
+            htmlParts.push('              name: point.name,');
+            htmlParts.push('              color: point.color');
+            htmlParts.push('            };');
+            htmlParts.push('            // Hide marker if it\'s not visible');
+            htmlParts.push('            if (!point.visible) {');
+            htmlParts.push('              map.removeLayer(marker);');
+            htmlParts.push('            }');
+            htmlParts.push('          }');
+            htmlParts.push('        });');
+            
+            // Add KML/KMZ layer data if available
+            if (kmlLayerData) {
+                htmlParts.push('        // Restore KML/KMZ layers');
+                htmlParts.push('        const kmlLayerData = ' + JSON.stringify(kmlLayerData) + ';');
+                htmlParts.push('        const kmlStylesData = ' + JSON.stringify(kmlStylesData) + ';');
+                htmlParts.push('        if (kmlLayerData && kmlLayerData.layers) {');
+                htmlParts.push('            kmlLayer = L.featureGroup().addTo(map);');
+                htmlParts.push('            kmlLayerData.layers.forEach(layerData => {');
+                htmlParts.push('                let layer;');
+                htmlParts.push('                if (layerData.type === "marker") {');
+                htmlParts.push('                    const options = {};');
+                htmlParts.push('                    if (layerData.icon) {');
+                htmlParts.push('                        options.icon = L.icon(layerData.icon);');
+                htmlParts.push('                    }');
+                htmlParts.push('                    layer = L.marker(layerData.latlng, options);');
+                htmlParts.push('                } else if (layerData.type === "polyline") {');
+                htmlParts.push('                    layer = L.polyline(layerData.latlngs, layerData.options);');
+                htmlParts.push('                } else if (layerData.type === "polygon") {');
+                htmlParts.push('                    layer = L.polygon(layerData.latlngs, layerData.options);');
+                htmlParts.push('                } else if (layerData.type === "imageOverlay") {');
+                htmlParts.push('                    layer = L.imageOverlay(layerData.url, layerData.bounds);');
+                htmlParts.push('                }');
+                htmlParts.push('                if (layer) {');
+                htmlParts.push('                    if (layerData.tooltip) {');
+                htmlParts.push('                        layer.bindTooltip(layerData.tooltip.content, layerData.tooltip.options);');
+                htmlParts.push('                    }');
+                htmlParts.push('                    if (layerData.popup) {');
+                htmlParts.push('                        layer.bindPopup(layerData.popup.content, layerData.popup.options);');
+                htmlParts.push('                    }');
+                htmlParts.push('                    layer.addTo(kmlLayer);');
+                htmlParts.push('                }');
+                htmlParts.push('            });');
+                htmlParts.push('        }');
+                htmlParts.push('');
+                htmlParts.push('        // Restore KMZ resources');
+                htmlParts.push('        window.kmzResources = ' + kmzResourcesData + ';');
+                
+                // Include all the necessary helper functions for KML processing
+                htmlParts.push('        // Helper functions for KML processing');
+                
+                // Parse KML color function
+                htmlParts.push('        function parseKmlColor(kmlColor) {');
+                htmlParts.push('            if (!kmlColor || kmlColor.length !== 8) {');
+                htmlParts.push('                return "#3388ff"; // Default blue color');
+                htmlParts.push('            }');
+                htmlParts.push('            const alpha = kmlColor.substr(0, 2);');
+                htmlParts.push('            const blue = kmlColor.substr(2, 2);');
+                htmlParts.push('            const green = kmlColor.substr(4, 2);');
+                htmlParts.push('            const red = kmlColor.substr(6, 2);');
+                htmlParts.push('            const opacity = parseInt(alpha, 16) / 255;');
+                htmlParts.push('            return `#${red}${green}${blue}`;');
+                htmlParts.push('        }');
+                
+                // Get icon href function
+                htmlParts.push('        function getIconHref(href, isKmz) {');
+                htmlParts.push('            if (!href) return null;');
+                htmlParts.push('            if (isKmz && window.kmzResources) {');
+                htmlParts.push('                if (window.kmzResources[href]) {');
+                htmlParts.push('                    return window.kmzResources[href];');
+                htmlParts.push('                }');
+                htmlParts.push('                const fileName = href.split("/").pop();');
+                htmlParts.push('                for (const key in window.kmzResources) {');
+                htmlParts.push('                    if (key.endsWith(fileName)) {');
+                htmlParts.push('                        return window.kmzResources[key];');
+                htmlParts.push('                    }');
+                htmlParts.push('                }');
+                htmlParts.push('            }');
+                htmlParts.push('            return href;');
+                htmlParts.push('        }');
+            }
+            
+            htmlParts.push('        // Fit map to bounds if there are any points');
+            htmlParts.push('        if (markersGroup.getLayers().length > 0) {');
+            htmlParts.push('          setTimeout(() => {');
+            htmlParts.push('            try {');
+            htmlParts.push('              map.invalidateSize(true);  // Force map to recalculate size');
+            htmlParts.push('              const bounds = markersGroup.getBounds();');
+            htmlParts.push('              if (bounds.isValid()) {');
+            htmlParts.push('                map.fitBounds(bounds, { padding: [50, 50], maxZoom: 20 });');
+            htmlParts.push('                // Final forced redraw after bounds are set');
+            htmlParts.push('                setTimeout(() => {');
+            htmlParts.push('                  map.invalidateSize(true);');
+            htmlParts.push('                }, 200);');
+            htmlParts.push('              } else {');
+            htmlParts.push('                map.setView([56.879, 24.603], 7); // Default center of Latvia');
+            htmlParts.push('              }');
+            htmlParts.push('            } catch (e) {');
+            htmlParts.push('              console.error("Error fitting bounds:", e);');
+            htmlParts.push('              map.setView([56.879, 24.603], 7);');
+            htmlParts.push('            }');
+            htmlParts.push('          }, 500); // Longer timeout for safer initialization in exported HTML');
+            htmlParts.push('        } else {');
+            htmlParts.push('          map.setView([56.879, 24.603], 7); // Default center of Latvia');
+            htmlParts.push('          map.invalidateSize(true);');
+            htmlParts.push('        }');
+            
+            htmlParts.push('        // Sinhronizācijas kods');
+            htmlParts.push('        var isSyncing = false;');
+            htmlParts.push('        var allReperNames = ' + allReperNames + ';');
+            htmlParts.push('        var filteredReperNames = ' + filteredReperNames + ';');
+            htmlParts.push('        var allDeformationValues = ' + allDeformationValues + ';');
+            htmlParts.push('        var allDates = ' + allDates + ';');
+            
+            htmlParts.push('        // DXF layer global variable');
+            htmlParts.push('        var dxfLayer = null;');
+            htmlParts.push('        var kmlLayer = null;');
+            
+            htmlParts.push('        function syncVisibility(sourceChartId, targetChartId, sourceNames, targetNames) {');
+            htmlParts.push('          // If syncing from chart1 to map');
+            htmlParts.push('          if (sourceChartId === "chart1" && targetChartId === "map") {');
+            htmlParts.push('            if (!window.reperMap || !window._map_markers_refs) return;');
+            htmlParts.push('            const sourceData = document.getElementById(sourceChartId).data;');
+            htmlParts.push('            for (const reperName in window._map_markers_refs) {');
+            htmlParts.push('              const reperInfo = window._map_markers_refs[reperName];');
+            htmlParts.push('              const sourceIdx = sourceNames.indexOf(reperName);');
+            htmlParts.push('              if (sourceIdx !== -1 && sourceData[sourceIdx]) {');
+            htmlParts.push('                const shouldBeVisible = sourceData[sourceIdx].visible !== "legendonly";');
+            htmlParts.push('                if (shouldBeVisible && !reperInfo.visible) {');
+            htmlParts.push('                  window.reperMap.addLayer(reperInfo.marker);');
+            htmlParts.push('                  reperInfo.visible = true;');
+            htmlParts.push('                } else if (!shouldBeVisible && reperInfo.visible) {');
+            htmlParts.push('                  window.reperMap.removeLayer(reperInfo.marker);');
+            htmlParts.push('                  reperInfo.visible = false;');
+            htmlParts.push('                }');
+            htmlParts.push('              }');
+            htmlParts.push('            }');
+            htmlParts.push('          } else if (sourceChartId === "chart1" && targetChartId === "chart1") {');
+            htmlParts.push('            const sourceData = document.getElementById(sourceChartId).data;');
+            htmlParts.push('            const targetData = document.getElementById(targetChartId).data;');
+            htmlParts.push('            const newVisibility = targetData.map(function(trace, i) {');
+            htmlParts.push('              const name = targetNames[i];');
+            htmlParts.push('              const sourceIdx = sourceNames.indexOf(name);');
+            htmlParts.push('              if (sourceIdx !== -1 && sourceData[sourceIdx]) {');
+            htmlParts.push('                return sourceData[sourceIdx].visible;');
+            htmlParts.push('              }');
+            htmlParts.push('              return typeof trace.visible !== "undefined" ? trace.visible : true;');
+            htmlParts.push('            });');
+            htmlParts.push('            if (newVisibility.some(function(v, i) { return v !== targetData[i].visible; })) {');
+            htmlParts.push('              Plotly.restyle(targetChartId, {visible: newVisibility});');
+            htmlParts.push('            }');
+            htmlParts.push('          }');
+            htmlParts.push('        }');
+            htmlParts.push('        document.getElementById("chart1").on("plotly_restyle", function() {');
+            htmlParts.push('          if (isSyncing) return;');
+            htmlParts.push('          isSyncing = true;');
+            htmlParts.push('          syncVisibility("chart1", "map", allReperNames, filteredReperNames);');
+            htmlParts.push('          isSyncing = false;');
+            htmlParts.push('        });');
+            htmlParts.push('      });');
+            htmlParts.push('    <\/script>');
+            htmlParts.push('</body>');
+            htmlParts.push('</html>');
+            const html = htmlParts.join('\n');
+            // Download
+            const blob = new Blob([html], { type: 'text/html' });
+            const url = window.URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = 'deformaciju_atskaite.html';
+            document.body.appendChild(a);
+            a.click();
+            setTimeout(() => {
+                document.body.removeChild(a);
+                window.URL.revokeObjectURL(url);
+            }, 0);
+        }
+    </script>
+</body>
+</html> 
